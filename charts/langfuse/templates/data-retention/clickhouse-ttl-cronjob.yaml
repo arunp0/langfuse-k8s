@@ -1,0 +1,68 @@
+{{- if and .Values.dataRetention.enabled .Values.dataRetention.clickhouse.enabled (or .Values.clickhouse.deploy .Values.clickhouse.host) }}
+{{/*
+ON CLUSTER is only used for application tables and mirrors the chart's cluster detection:
+cluster mode is off when clusterEnabled is false, or when the bundled ClickHouse runs a
+single replica. system.* tables are always per-node and never use ON CLUSTER.
+*/}}
+{{- $clusterName := "" }}
+{{- if .Values.clickhouse.clusterEnabled }}
+{{- if not (and .Values.clickhouse.deploy (eq (int .Values.clickhouse.replicaCount) 1)) }}
+{{- $clusterName = .Values.dataRetention.clickhouse.clusterName }}
+{{- end }}
+{{- end }}
+apiVersion: batch/v1
+kind: CronJob
+metadata:
+  name: {{ printf "%s-data-retention-clickhouse" (include "langfuse.fullname" .) | trunc 52 | trimSuffix "-" }}
+  labels:
+    {{- include "langfuse.labels" . | nindent 4 }}
+    app.kubernetes.io/component: data-retention
+    {{- with .Values.dataRetention.cronJob.labels }}
+    {{- toYaml . | nindent 4 }}
+    {{- end }}
+  {{- with .Values.dataRetention.cronJob.annotations }}
+  annotations:
+    {{- toYaml . | nindent 4 }}
+  {{- end }}
+spec:
+  schedule: {{ .Values.dataRetention.clickhouse.schedule | quote }}
+  {{- include "langfuse.dataRetention.cronJobSettings" . | nindent 2 }}
+  jobTemplate:
+    spec:
+      backoffLimit: {{ .Values.dataRetention.cronJob.backoffLimit }}
+      activeDeadlineSeconds: {{ .Values.dataRetention.cronJob.activeDeadlineSeconds }}
+      template:
+        metadata:
+          labels:
+            {{- include "langfuse.selectorLabels" . | nindent 12 }}
+            app.kubernetes.io/component: data-retention
+        spec:
+          {{- include "langfuse.dataRetention.podSettings" . | nindent 10 }}
+          containers:
+            - name: clickhouse-ttl
+              image: "{{ .Values.dataRetention.clickhouse.image.repository }}:{{ .Values.dataRetention.clickhouse.image.tag }}"
+              imagePullPolicy: {{ .Values.dataRetention.clickhouse.image.pullPolicy }}
+              securityContext:
+                {{- toYaml .Values.langfuse.securityContext | nindent 16 }}
+              command: ["/bin/sh", "/scripts/clickhouse-ttl.sh"]
+              env:
+                - name: RETENTION_DAYS
+                  value: {{ include "langfuse.dataRetention.days" (dict "component" .Values.dataRetention.clickhouse "root" .) | quote }}
+                - name: SYSTEM_LOGS_ENABLED
+                  value: {{ .Values.dataRetention.clickhouse.systemLogs.enabled | quote }}
+                - name: SYSTEM_LOG_RETENTION_DAYS
+                  value: {{ .Values.dataRetention.clickhouse.systemLogs.days | quote }}
+                - name: DROP_ORPHANED_TABLES
+                  value: {{ .Values.dataRetention.clickhouse.systemLogs.dropOrphanedTables | quote }}
+                - name: CLICKHOUSE_CLUSTER_NAME
+                  value: {{ $clusterName | quote }}
+                {{- include "langfuse.dataRetention.clickhouseEnv" . | nindent 16 }}
+              volumeMounts:
+                - name: scripts
+                  mountPath: /scripts
+                  readOnly: true
+              {{- with .Values.dataRetention.clickhouse.resources }}
+              resources:
+                {{- toYaml . | nindent 16 }}
+              {{- end }}
+{{- end }}

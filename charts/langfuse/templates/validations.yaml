@@ -249,6 +249,24 @@
     {{- fail "If keda is enabled for worker component, you cannot enable hpa or vpa. Please disable either keda or both hpa and vpa." -}}
 {{- end -}}
 
+# Validate Data Retention settings
+{{- if $.Values.dataRetention.enabled -}}
+{{- if lt ($.Values.dataRetention.days | int) 1 -}}
+    {{- fail "dataRetention.days must be at least 1" -}}
+{{- end -}}
+{{- range $name, $component := dict "minio.lifecycle" $.Values.dataRetention.minio.lifecycle "minio.sweep" $.Values.dataRetention.minio.sweep "clickhouse" $.Values.dataRetention.clickhouse "postgres" $.Values.dataRetention.postgres -}}
+{{- if and (ne ($component.days | toString) "<nil>") (lt ($component.days | int) 1) -}}
+    {{- fail (printf "dataRetention.%s.days must be at least 1" $name) -}}
+{{- end -}}
+{{- end -}}
+{{- if lt ($.Values.dataRetention.clickhouse.systemLogs.days | int) 1 -}}
+    {{- fail "dataRetention.clickhouse.systemLogs.days must be at least 1" -}}
+{{- end -}}
+{{- if and $.Values.dataRetention.postgres.enabled (include "langfuse.getEnvVar" (dict "env" $.Values.langfuse.additionalEnv "name" "DATABASE_URL")) -}}
+    {{- fail "dataRetention.postgres requires the structured postgresql.* values and cannot be used with langfuse.additionalEnv[name: DATABASE_URL]. Configure postgresql.host/auth to continue." -}}
+{{- end -}}
+{{- end -}}
+
 # Validate Pod Disruption Budget settings
 {{- $webPdb := default dict $.Values.langfuse.web.pdb -}}
 {{- $webMinAvailable := get $webPdb "minAvailable" -}}

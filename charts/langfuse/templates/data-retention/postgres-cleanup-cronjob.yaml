@@ -1,0 +1,53 @@
+{{- if and .Values.dataRetention.enabled .Values.dataRetention.postgres.enabled (or .Values.postgresql.deploy .Values.postgresql.host) }}
+apiVersion: batch/v1
+kind: CronJob
+metadata:
+  name: {{ printf "%s-data-retention-postgres" (include "langfuse.fullname" .) | trunc 52 | trimSuffix "-" }}
+  labels:
+    {{- include "langfuse.labels" . | nindent 4 }}
+    app.kubernetes.io/component: data-retention
+    {{- with .Values.dataRetention.cronJob.labels }}
+    {{- toYaml . | nindent 4 }}
+    {{- end }}
+  {{- with .Values.dataRetention.cronJob.annotations }}
+  annotations:
+    {{- toYaml . | nindent 4 }}
+  {{- end }}
+spec:
+  schedule: {{ .Values.dataRetention.postgres.schedule | quote }}
+  {{- include "langfuse.dataRetention.cronJobSettings" . | nindent 2 }}
+  jobTemplate:
+    spec:
+      backoffLimit: {{ .Values.dataRetention.cronJob.backoffLimit }}
+      activeDeadlineSeconds: {{ .Values.dataRetention.cronJob.activeDeadlineSeconds }}
+      template:
+        metadata:
+          labels:
+            {{- include "langfuse.selectorLabels" . | nindent 12 }}
+            app.kubernetes.io/component: data-retention
+        spec:
+          {{- include "langfuse.dataRetention.podSettings" . | nindent 10 }}
+          containers:
+            - name: postgres-cleanup
+              image: "{{ .Values.dataRetention.postgres.image.repository }}:{{ .Values.dataRetention.postgres.image.tag }}"
+              imagePullPolicy: {{ .Values.dataRetention.postgres.image.pullPolicy }}
+              securityContext:
+                {{- toYaml .Values.langfuse.securityContext | nindent 16 }}
+              command: ["/bin/sh", "/scripts/postgres-cleanup.sh"]
+              env:
+                - name: RETENTION_DAYS
+                  value: {{ include "langfuse.dataRetention.days" (dict "component" .Values.dataRetention.postgres "root" .) | quote }}
+                - name: PG_BATCH_SIZE
+                  value: {{ .Values.dataRetention.postgres.batchSize | quote }}
+                - name: PG_BATCH_SLEEP
+                  value: {{ .Values.dataRetention.postgres.batchSleepSeconds | quote }}
+                {{- include "langfuse.dataRetention.postgresEnv" . | nindent 16 }}
+              volumeMounts:
+                - name: scripts
+                  mountPath: /scripts
+                  readOnly: true
+              {{- with .Values.dataRetention.postgres.resources }}
+              resources:
+                {{- toYaml . | nindent 16 }}
+              {{- end }}
+{{- end }}
