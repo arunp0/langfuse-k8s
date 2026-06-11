@@ -239,7 +239,7 @@ Notes:
 - Pause everything without uninstalling: `dataRetention.suspend: true`.
 - Separately, transparent on-disk **compression is enabled by default for the bundled MinIO** (`s3.extraEnvVars`) — Langfuse event payloads are JSON and typically shrink 3–8x. Set `s3.extraEnvVars: []` to disable. It has no effect on external S3.
 
-See [examples/production-retention](examples/production-retention) for an aggressive 7-day profile.
+See [examples/data-retention](examples/data-retention) for ready-made profiles (defaults, long queryable history with a short raw archive, external services) and [examples/production-retention](examples/production-retention) for an aggressive 7-day profile.
 
 #### Examples
 

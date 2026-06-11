@@ -1,0 +1,26 @@
+# Short raw-event archive, long queryable history.
+#
+# The Langfuse UI serves traces from ClickHouse; the raw S3 events are only an
+# ingestion archive (re-processing / debugging). This profile expires the raw
+# archive after 7 days while keeping 90 days of queryable trace history:
+#
+#   - S3 raw events + otel payloads: 7 days  (dataRetention.days)
+#   - ClickHouse application tables: 90 days (dataRetention.clickhouse.days override)
+#   - ClickHouse internal system logs: 7 days (independent window, on by default)
+#
+# Trade-off: events older than 7 days cannot be re-processed from the raw archive.
+# If trace history matters for disaster recovery, back up ClickHouse.
+#
+# Secrets (salt, nextauth, passwords) omitted - see examples/minimal-installation.
+
+dataRetention:
+  enabled: true
+  days: 7
+
+  clickhouse:
+    days: 90
+
+  minio:
+    # Optional: guarantee timely deletion instead of waiting for the ILM scanner.
+    sweep:
+      enabled: true
