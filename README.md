@@ -204,6 +204,43 @@ By default, the system uses the S3-compatible method.
 When Azure or GCS is selected, the respective native storage integration is enabled with the appropriate environment variables.
 See our [self-hosting docs](https://langfuse.com/self-hosting/infrastructure/blobstorage) for more details on Blob Storage configurations.
 
+#### Data Retention
+
+By default a Langfuse deployment grows its disk usage unboundedly in three places:
+
+- **S3/MinIO**: every ingested event is archived as a raw JSON object under `{projectId}/{type}/` (plus raw OTel payloads under `otel/`). These are only read again for re-processing and debugging — the queryable copy lives in ClickHouse — but they are never deleted.
+- **ClickHouse application tables** (`traces`, `observations`, `scores`, ...) have no TTL.
+- **ClickHouse internal system logs** (`system.query_log`, `system.opentelemetry_span_log`, `system.trace_log`, ...) have no TTL either and routinely grow far past the size of the actual Langfuse data (a real-world deployment accumulated 40 GiB of system logs next to 2.5 GiB of data). ClickHouse upgrades additionally leave orphaned `*_log_N` table generations behind.
+
+The chart ships an opt-in data retention feature that keeps disk usage flat via four CronJobs:
+
+| CronJob | What it does | Default |
+| --- | --- | --- |
+| `*-data-retention-minio-lifecycle` | Rebuilds S3 ILM expiry rules for `{projectId}/{type}/` and `otel/` prefixes (idempotent, picks up new projects automatically) | daily, on |
+| `*-data-retention-minio-sweep` | Actively deletes expired objects (`mc rm --older-than`) since the ILM scanner can lag | weekly, off |
+| `*-data-retention-clickhouse` | Applies `MODIFY TTL` to Langfuse tables, TTLs all `system.*_log` tables (independent window), drops orphaned `*_log_N` tables | daily, on |
+| `*-data-retention-postgres` | Batched deletion of old `audit_logs`, media link rows, `job_executions`, etc. (skips absent tables) | daily, off |
+
+Enable it with:
+
+```yaml
+dataRetention:
+  enabled: true
+  days: 30 # retention window for application data
+```
+
+Notes:
+
+- **Media files are never deleted.** Media objects are stored as plain files at `{projectId}/{mediaId}`; the MinIO jobs only ever target `{projectId}/{type}/` folder prefixes, so media cannot match.
+- **The Langfuse UI keeps full history**: raw S3 events are an ingestion archive; expiring them does not delete traces from ClickHouse. The ClickHouse TTL is what bounds the queryable history — set `dataRetention.clickhouse.days` (or disable that job) independently if you want shorter raw-event retention than trace retention.
+- ClickHouse system-log expiry runs with its own window (`dataRetention.clickhouse.systemLogs.days`, default 7) and is the single highest-value setting — it is on whenever retention is enabled.
+- Credentials are reused from the existing `s3.*`, `clickhouse.*` and `postgresql.*` values — no new secrets needed. External S3/ClickHouse/Postgres are supported; the MinIO jobs are skipped for `azure`/`gcs` storage providers (use native lifecycle policies there).
+- Run any job on demand: `kubectl create job --from=cronjob/<release>-langfuse-data-retention-clickhouse manual-1`.
+- Pause everything without uninstalling: `dataRetention.suspend: true`.
+- Separately, transparent on-disk **compression is enabled by default for the bundled MinIO** (`s3.extraEnvVars`) — Langfuse event payloads are JSON and typically shrink 3–8x. Set `s3.extraEnvVars: []` to disable. It has no effect on external S3.
+
+See [examples/production-retention](examples/production-retention) for an aggressive 7-day profile.
+
 #### Examples
 
 ##### With an external Postgres server

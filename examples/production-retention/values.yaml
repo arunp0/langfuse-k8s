@@ -1,0 +1,40 @@
+# Aggressive 7-day retention profile.
+#
+# Based on a production deployment where unbounded growth had accumulated 107 GB of
+# disk for ~2.5 GB of actual application data. With this profile, steady-state disk
+# usage stays flat: raw S3 events and OTel payloads roll over after 7 days, ClickHouse
+# application tables keep a 7-day window, and ClickHouse internal system logs are
+# expired and de-orphaned automatically.
+#
+# What you give up with a short raw-event window: re-processing events older than
+# 7 days from the raw archive (e.g. replaying into ClickHouse after a disaster).
+# If trace history matters to you, back up ClickHouse instead of keeping raw events.
+#
+# The Langfuse UI serves data from ClickHouse: dataRetention.clickhouse.days is what
+# bounds visible trace history. Raise it (e.g. to 90) if you want long queryable
+# history while still expiring the raw S3 archive quickly - set
+# dataRetention.days: 7 and dataRetention.clickhouse.days: 90 in that case.
+#
+# Secrets (salt, nextauth, passwords) omitted - see examples/minimal-installation.
+
+dataRetention:
+  enabled: true
+  days: 7
+
+  minio:
+    # The ILM scanner can lag by a day or more; the sweep guarantees timely deletion.
+    sweep:
+      enabled: true
+      schedule: "30 3 * * *" # daily instead of the weekly default
+
+  clickhouse:
+    systemLogs:
+      enabled: true
+      days: 7
+      dropOrphanedTables: true
+
+  postgres:
+    enabled: true
+
+# MinIO on-disk compression for JSON payloads is already enabled by default via
+# s3.extraEnvVars (typically 3-8x smaller). Nothing to configure here.

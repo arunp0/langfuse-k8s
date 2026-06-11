@@ -1,6 +1,6 @@
 # langfuse
 
-![Version: 1.5.34](https://img.shields.io/badge/Version-1.5.34-informational?style=flat-square) ![Type: application](https://img.shields.io/badge/Type-application-informational?style=flat-square) ![AppVersion: 3.179.1](https://img.shields.io/badge/AppVersion-3.179.1-informational?style=flat-square)
+![Version: 1.6.0](https://img.shields.io/badge/Version-1.6.0-informational?style=flat-square) ![Type: application](https://img.shields.io/badge/Type-application-informational?style=flat-square) ![AppVersion: 3.179.1](https://img.shields.io/badge/AppVersion-3.179.1-informational?style=flat-square)
 
 Open source LLM engineering platform - LLM observability, metrics, evaluations, prompt management.
 
@@ -49,6 +49,51 @@ Open source LLM engineering platform - LLM observability, metrics, evaluations, 
 | clickhouse.resourcesPreset | string | `"2xlarge"` | The resources preset to use for the ClickHouse cluster. |
 | clickhouse.shards | int | `1` | Subchart specific settings |
 | clickhouse.zookeeper.image.repository | string | `"bitnamilegacy/zookeeper"` | Overwrite default repository of helm chart to point to non-paid bitnami images. |
+| dataRetention.clickhouse.clusterName | string | `"default"` | Cluster name used for `ON CLUSTER` application-table ALTERs when `clickhouse.clusterEnabled` and more than one replica is deployed. Set to "" to disable ON CLUSTER. |
+| dataRetention.clickhouse.days | string | `nil` | Retention days for application tables. Falls back to `dataRetention.days`. |
+| dataRetention.clickhouse.enabled | bool | `true` | Apply TTLs to the Langfuse ClickHouse tables (traces, observations, scores, dataset_run_items, event_log, blob_storage_file_log). Existing data older than the window is deleted by ClickHouse TTL merges. |
+| dataRetention.clickhouse.image.pullPolicy | string | `"IfNotPresent"` | Image pull policy for the ClickHouse retention job |
+| dataRetention.clickhouse.image.repository | string | `"clickhouse/clickhouse-server"` | Image providing clickhouse-client (scripts are POSIX sh, no bash needed) |
+| dataRetention.clickhouse.image.tag | string | `"25.2-alpine"` | ClickHouse client image tag; keep >= the deployed server version |
+| dataRetention.clickhouse.resources | object | `{}` | Resources for the ClickHouse TTL job container |
+| dataRetention.clickhouse.schedule | string | `"15 3 * * *"` | Cron schedule |
+| dataRetention.clickhouse.secure | bool | `false` | Use a secure (TLS) native connection (e.g. ClickHouse Cloud, port 9440) |
+| dataRetention.clickhouse.systemLogs.days | int | `7` | Retention days for system log tables (independent of `dataRetention.days`) |
+| dataRetention.clickhouse.systemLogs.dropOrphanedTables | bool | `true` | Drop orphaned `system.*_log_N` table generations left behind by ClickHouse upgrades |
+| dataRetention.clickhouse.systemLogs.enabled | bool | `true` | Also apply TTLs to ClickHouse internal `system.*_log` tables (query_log, opentelemetry_span_log, trace_log, metric_log, part_log, ...). These have no TTL by default and grow unboundedly - typically far past the size of the actual Langfuse data. Safe to expire: they are diagnostics, not application data. |
+| dataRetention.cronJob.activeDeadlineSeconds | int | `3600` | activeDeadlineSeconds for retention Jobs (kills hung runs) |
+| dataRetention.cronJob.annotations | object | `{}` | Annotations applied to all retention CronJobs |
+| dataRetention.cronJob.backoffLimit | int | `2` | backoffLimit for retention Jobs |
+| dataRetention.cronJob.failedJobsHistoryLimit | int | `3` | How many failed Jobs to keep per CronJob |
+| dataRetention.cronJob.labels | object | `{}` | Additional labels applied to all retention CronJobs |
+| dataRetention.cronJob.nodeSelector | object | `{}` | Node selector for retention job pods. Falls back to `langfuse.nodeSelector`. |
+| dataRetention.cronJob.startingDeadlineSeconds | int | `600` | startingDeadlineSeconds for all retention CronJobs |
+| dataRetention.cronJob.successfulJobsHistoryLimit | int | `3` | How many successful Jobs to keep per CronJob |
+| dataRetention.cronJob.tolerations | list | `[]` | Tolerations for retention job pods. Falls back to `langfuse.tolerations`. |
+| dataRetention.days | int | `30` | Global retention period in days for application data (raw S3 events, ClickHouse application tables, Postgres rows). Per-component `days` settings override this value. |
+| dataRetention.enabled | bool | `false` | Master switch for all data retention CronJobs (opt-in). When false, no retention resources are rendered. |
+| dataRetention.minio.bucket | string | `""` | Bucket to apply retention to. Defaults to the resolved event upload bucket (`s3.eventUpload.bucket` / `s3.bucket` / `s3.defaultBuckets`). |
+| dataRetention.minio.image.pullPolicy | string | `"IfNotPresent"` | Image pull policy for the MinIO retention jobs |
+| dataRetention.minio.image.repository | string | `"minio/mc"` | Image for the MinIO retention jobs. NOTE: scripts are written for POSIX sh (minio/mc has no bash/sed/awk). |
+| dataRetention.minio.image.tag | string | `"RELEASE.2025-08-13T08-35-41Z"` | MinIO client image tag |
+| dataRetention.minio.lifecycle.days | string | `nil` | Retention days for raw event objects. Falls back to `dataRetention.days`. |
+| dataRetention.minio.lifecycle.enabled | bool | `true` | Apply per-prefix ILM expiry rules for raw event folders (`{projectId}/{type}/`) and `otel/`. Media objects (plain files at `{projectId}/{mediaId}`) are never matched. Only rendered for the bundled MinIO or an explicit S3-compatible endpoint (`s3.storageProvider: s3`). |
+| dataRetention.minio.lifecycle.resources | object | `{}` | Resources for the lifecycle job container |
+| dataRetention.minio.lifecycle.schedule | string | `"0 3 * * *"` | Cron schedule. Rules are rebuilt idempotently on each run, picking up new projects and event types automatically. |
+| dataRetention.minio.sweep.days | string | `nil` | Retention days for the sweep. Falls back to `dataRetention.days`. |
+| dataRetention.minio.sweep.enabled | bool | `false` |  |
+| dataRetention.minio.sweep.resources | object | `{}` | Resources for the sweep job container |
+| dataRetention.minio.sweep.schedule | string | `"30 3 * * 0"` | Cron schedule |
+| dataRetention.postgres.batchSize | int | `5000` | Rows deleted per batch (ctid-based batched DELETE keeps lock times short) |
+| dataRetention.postgres.batchSleepSeconds | int | `2` | Sleep between batches in seconds |
+| dataRetention.postgres.days | string | `nil` | Retention days for Postgres rows. Falls back to `dataRetention.days`. |
+| dataRetention.postgres.enabled | bool | `false` | Batched cleanup of old Postgres rows (audit_logs, media link tables, media, job_executions, trace_sessions; legacy traces/observations/scores are cleaned too when present, and skipped gracefully otherwise). Off by default - Postgres volume is low on Langfuse v3. |
+| dataRetention.postgres.image.pullPolicy | string | `"IfNotPresent"` | Image pull policy for the Postgres retention job |
+| dataRetention.postgres.image.repository | string | `"postgres"` | Image providing psql (scripts are POSIX sh, no bash needed) |
+| dataRetention.postgres.image.tag | string | `"17-alpine"` | Postgres client image tag |
+| dataRetention.postgres.resources | object | `{}` | Resources for the Postgres cleanup job container |
+| dataRetention.postgres.schedule | string | `"45 3 * * *"` | Cron schedule |
+| dataRetention.suspend | bool | `false` | Suspend all retention CronJobs (sets `spec.suspend`) without deleting them. |
 | extraManifests | list | `[]` |  |
 | fullnameOverride | string | `""` | Override the full name of the deployed resources, defaults to a combination of the release name and the name for the selector labels |
 | global.security.allowInsecureImages | bool | `true` | Allow insecure images to use bitnami legacy repository. Can be set to false if secure images are being used (Paid). |
@@ -273,6 +318,7 @@ Open source LLM engineering platform - LLM observability, metrics, evaluations, 
 | s3.eventUpload.prefix | string | `""` | Prefix to use for event uploads within the bucket. |
 | s3.eventUpload.region | string | `""` | S3 region to use for event uploads. |
 | s3.eventUpload.secretAccessKey | object | `{"secretKeyRef":{"key":"","name":""},"value":""}` | S3 secretAccessKey to use for event uploads. |
+| s3.extraEnvVars | list | `[{"name":"MINIO_COMPRESSION_ENABLE","value":"on"},{"name":"MINIO_COMPRESSION_EXTENSIONS","value":".json"},{"name":"MINIO_COMPRESSION_MIME_TYPES","value":"application/json"}]` | Extra environment variables passed to the bundled MinIO subchart only (no effect on external S3). Langfuse stores raw events as highly compressible JSON, so transparent on-disk compression is enabled by default (typically 3-8x smaller). Set to `[]` to disable. NOTE: providing your own list replaces this default entirely. |
 | s3.forcePathStyle | bool | `true` | Whether to force path style on requests. Required for MinIO. Can be overridden per upload type. |
 | s3.gcs.credentials | object | `{"secretKeyRef":{"key":"","name":""},"value":""}` | Example: Set value to the JSON service account key content, or use secretKeyRef to reference a secret |
 | s3.image.repository | string | `"bitnamilegacy/minio"` | Overwrite default repository of helm chart to point to non-paid bitnami images. |
