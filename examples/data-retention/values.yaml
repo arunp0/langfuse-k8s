@@ -1,0 +1,15 @@
+# Basic data retention: keep 30 days of everything, using the chart defaults.
+#
+# This renders three CronJobs (the weekly MinIO sweep and the Postgres cleanup stay
+# off by default) plus a scripts ConfigMap:
+#   - <release>-langfuse-data-retention-minio-lifecycle (daily ILM rule sync)
+#   - <release>-langfuse-data-retention-clickhouse      (daily TTL sync + system log expiry)
+#
+# Credentials are reused from the regular s3.*, clickhouse.* and postgresql.* values -
+# nothing extra to configure. Media files are never deleted by these jobs.
+#
+# Secrets (salt, nextauth, passwords) omitted - see examples/minimal-installation.
+
+dataRetention:
+  enabled: true
+  days: 30

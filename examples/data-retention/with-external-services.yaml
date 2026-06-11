@@ -1,0 +1,59 @@
+# Data retention against external (non-deployed) services.
+#
+# The retention jobs reuse the same endpoints and credentials as the Langfuse
+# deployments, so pointing the chart at external S3/ClickHouse/Postgres is all
+# that is needed - no retention-specific credentials exist.
+#
+#   - MinIO lifecycle/sweep run against any S3-compatible endpoint (MinIO, AWS S3,
+#     Cloudflare R2, ...). For AWS S3 you may prefer native lifecycle policies and
+#     can set dataRetention.minio.lifecycle.enabled: false.
+#   - For azure/gcs storage providers the MinIO jobs are skipped automatically.
+#   - The ClickHouse job supports TLS endpoints (e.g. ClickHouse Cloud) via
+#     dataRetention.clickhouse.secure: true (native port 9440).
+#
+# Secrets referenced below must exist beforehand - see examples/minimal-installation.
+
+s3:
+  deploy: false
+  bucket: my-langfuse-bucket
+  endpoint: https://s3.example.com
+  forcePathStyle: true
+  accessKeyId:
+    secretKeyRef:
+      name: langfuse-external
+      key: s3-access-key-id
+  secretAccessKey:
+    secretKeyRef:
+      name: langfuse-external
+      key: s3-secret-access-key
+
+clickhouse:
+  deploy: false
+  host: clickhouse.example.com
+  nativePort: 9440
+  auth:
+    username: default
+    existingSecret: langfuse-external
+    existingSecretKey: clickhouse-password
+
+postgresql:
+  deploy: false
+  host: postgres.example.com
+  auth:
+    username: langfuse
+    database: langfuse
+    existingSecret: langfuse-external
+    secretKeys:
+      userPasswordKey: postgresql-password
+
+dataRetention:
+  enabled: true
+  days: 30
+
+  clickhouse:
+    secure: true
+    # External managed ClickHouse is usually a replicated cluster; keep the default
+    # clusterName ("default") or set your cluster's name. Set to "" for single nodes.
+
+  postgres:
+    enabled: true
