@@ -728,3 +728,149 @@ Common environment variables for all deployments
 {{ include "langfuse.clickhouseEnv" . }}
 {{ include "langfuse.s3Env" . }}
 {{- end -}}
+
+{{/*
+    Resolved retention days for a data retention component.
+    Usage: include "langfuse.dataRetention.days" (dict "component" .Values.dataRetention.minio.lifecycle "root" .)
+*/}}
+{{- define "langfuse.dataRetention.days" -}}
+{{- .component.days | default .root.Values.dataRetention.days -}}
+{{- end -}}
+
+{{/*
+    S3/MinIO environment variables for the data retention jobs.
+    Reuses the exact endpoint/bucket/credential resolution of "langfuse.s3Env" (event upload),
+    including the bundled-MinIO root credential fallback.
+*/}}
+{{- define "langfuse.dataRetention.s3Env" -}}
+- name: MINIO_ENDPOINT
+  value: {{ .Values.s3.eventUpload.endpoint | default .Values.s3.endpoint | default (include "langfuse.s3.endpoint" .) | quote }}
+- name: S3_BUCKET
+{{- if .Values.dataRetention.minio.bucket }}
+  value: {{ .Values.dataRetention.minio.bucket | quote }}
+{{- else if .Values.s3.deploy }}
+  value: {{ required "s3.[eventUpload].bucket is required" (coalesce .Values.s3.eventUpload.bucket .Values.s3.bucket .Values.s3.defaultBuckets) | quote }}
+{{- else }}
+  value: {{ required "s3.[eventUpload].bucket is required" (.Values.s3.eventUpload.bucket | default .Values.s3.bucket) | quote }}
+{{- end }}
+{{- with (include "langfuse.getS3ValueOrSecret" (dict "key" "accessKeyId" "bucket" "eventUpload" "values" .Values.s3) ) }}
+- name: S3_ACCESS_KEY_ID
+  {{- . | nindent 2 }}
+{{- else }}
+{{- if .Values.s3.deploy }}
+- name: S3_ACCESS_KEY_ID
+  {{- if and .Values.s3.auth.existingSecret .Values.s3.auth.rootUserSecretKey }}
+  valueFrom:
+    secretKeyRef:
+      name: {{ .Values.s3.auth.existingSecret }}
+      key: {{ .Values.s3.auth.rootUserSecretKey }}
+  {{- else }}
+  value: {{ .Values.s3.auth.rootUser | quote }}
+  {{- end }}
+{{- end }}
+{{- end }}
+{{- with (include "langfuse.getS3ValueOrSecret" (dict "key" "secretAccessKey" "bucket" "eventUpload" "values" .Values.s3) ) }}
+- name: S3_SECRET_ACCESS_KEY
+  {{- . | nindent 2 }}
+{{- else }}
+{{- if .Values.s3.deploy }}
+- name: S3_SECRET_ACCESS_KEY
+  {{- if and .Values.s3.auth.existingSecret .Values.s3.auth.rootPasswordSecretKey }}
+  valueFrom:
+    secretKeyRef:
+      name: {{ .Values.s3.auth.existingSecret }}
+      key: {{ .Values.s3.auth.rootPasswordSecretKey }}
+  {{- else }}
+  value: {{ .Values.s3.auth.rootPassword | quote }}
+  {{- end }}
+{{- end }}
+{{- end }}
+{{- end -}}
+
+{{/*
+    ClickHouse environment variables for the data retention job.
+    Trimmed variant of "langfuse.clickhouseEnv": no migration URLs or migration flags.
+*/}}
+{{- define "langfuse.dataRetention.clickhouseEnv" -}}
+- name: CLICKHOUSE_HOST
+  value: {{ include "langfuse.clickhouse.hostname" . | quote }}
+- name: CLICKHOUSE_NATIVE_PORT
+  value: {{ .Values.clickhouse.nativePort | quote }}
+- name: CLICKHOUSE_DB
+  value: {{ .Values.clickhouse.database | quote }}
+- name: CLICKHOUSE_USER
+  value: {{ .Values.clickhouse.auth.username | quote }}
+- name: CLICKHOUSE_PASSWORD
+{{- if .Values.clickhouse.auth.existingSecret }}
+  valueFrom:
+    secretKeyRef:
+      name: {{ .Values.clickhouse.auth.existingSecret }}
+      key: {{ required "clickhouse.auth.existingSecretKey is required when using an existing secret" .Values.clickhouse.auth.existingSecretKey }}
+{{- else }}
+  value: {{ required "Configuring an existing secret or clickhouse.auth.password is required" .Values.clickhouse.auth.password | quote }}
+{{- end }}
+- name: CLICKHOUSE_SECURE
+  value: {{ .Values.dataRetention.clickhouse.secure | quote }}
+{{- end -}}
+
+{{/*
+    PostgreSQL environment variables for the data retention job.
+    Uses libpq standard variables so the script can call psql directly.
+*/}}
+{{- define "langfuse.dataRetention.postgresEnv" -}}
+- name: PGHOST
+  value: {{ include "langfuse.postgresql.hostname" . | quote }}
+- name: PGPORT
+  value: {{ .Values.postgresql.port | default 5432 | quote }}
+- name: PGDATABASE
+  value: {{ .Values.postgresql.auth.database | quote }}
+- name: PGUSER
+  value: {{ .Values.postgresql.auth.username | quote }}
+- name: PGPASSWORD
+{{- if .Values.postgresql.auth.existingSecret }}
+  valueFrom:
+    secretKeyRef:
+      name: {{ .Values.postgresql.auth.existingSecret }}
+      key: {{ required "postgresql.auth.secretKeys.userPasswordKey is required when using an existing secret" .Values.postgresql.auth.secretKeys.userPasswordKey }}
+{{- else }}
+  value: {{ required "Using an existing secret or postgresql.auth.password is required" .Values.postgresql.auth.password | quote }}
+{{- end }}
+{{- end -}}
+
+{{/*
+    Shared CronJob spec settings for data retention jobs.
+*/}}
+{{- define "langfuse.dataRetention.cronJobSettings" -}}
+suspend: {{ .Values.dataRetention.suspend }}
+concurrencyPolicy: Forbid
+startingDeadlineSeconds: {{ .Values.dataRetention.cronJob.startingDeadlineSeconds }}
+successfulJobsHistoryLimit: {{ .Values.dataRetention.cronJob.successfulJobsHistoryLimit }}
+failedJobsHistoryLimit: {{ .Values.dataRetention.cronJob.failedJobsHistoryLimit }}
+{{- end -}}
+
+{{/*
+    Shared pod-level settings for data retention jobs.
+*/}}
+{{- define "langfuse.dataRetention.podSettings" -}}
+restartPolicy: Never
+serviceAccountName: {{ include "langfuse.serviceAccountName" . }}
+{{- with .Values.langfuse.image.pullSecrets }}
+imagePullSecrets:
+  {{- toYaml . | nindent 2 }}
+{{- end }}
+securityContext:
+  {{- toYaml .Values.langfuse.podSecurityContext | nindent 2 }}
+{{- with (coalesce .Values.dataRetention.cronJob.nodeSelector .Values.langfuse.nodeSelector) }}
+nodeSelector:
+  {{- toYaml . | nindent 2 }}
+{{- end }}
+{{- with (coalesce .Values.dataRetention.cronJob.tolerations .Values.langfuse.tolerations) }}
+tolerations:
+  {{- toYaml . | nindent 2 }}
+{{- end }}
+volumes:
+  - name: scripts
+    configMap:
+      name: {{ include "langfuse.fullname" . }}-data-retention-scripts
+      defaultMode: 0555
+{{- end -}}
