@@ -1,0 +1,54 @@
+{{/*
+Optional accelerator for the lifecycle rules: the MinIO ILM scanner can lag behind by a
+day or more, this job actively deletes expired objects. Same media-safety traversal as
+the lifecycle job. Only rendered for S3-compatible storage.
+*/}}
+{{- if and .Values.dataRetention.enabled .Values.dataRetention.minio.sweep.enabled (eq .Values.s3.storageProvider "s3") (or .Values.s3.deploy .Values.s3.endpoint .Values.s3.eventUpload.endpoint) }}
+apiVersion: batch/v1
+kind: CronJob
+metadata:
+  name: {{ printf "%s-data-retention-minio-sweep" (include "langfuse.fullname" .) | trunc 52 | trimSuffix "-" }}
+  labels:
+    {{- include "langfuse.labels" . | nindent 4 }}
+    app.kubernetes.io/component: data-retention
+    {{- with .Values.dataRetention.cronJob.labels }}
+    {{- toYaml . | nindent 4 }}
+    {{- end }}
+  {{- with .Values.dataRetention.cronJob.annotations }}
+  annotations:
+    {{- toYaml . | nindent 4 }}
+  {{- end }}
+spec:
+  schedule: {{ .Values.dataRetention.minio.sweep.schedule | quote }}
+  {{- include "langfuse.dataRetention.cronJobSettings" . | nindent 2 }}
+  jobTemplate:
+    spec:
+      backoffLimit: {{ .Values.dataRetention.cronJob.backoffLimit }}
+      activeDeadlineSeconds: {{ .Values.dataRetention.cronJob.activeDeadlineSeconds }}
+      template:
+        metadata:
+          labels:
+            {{- include "langfuse.selectorLabels" . | nindent 12 }}
+            app.kubernetes.io/component: data-retention
+        spec:
+          {{- include "langfuse.dataRetention.podSettings" . | nindent 10 }}
+          containers:
+            - name: minio-sweep
+              image: "{{ .Values.dataRetention.minio.image.repository }}:{{ .Values.dataRetention.minio.image.tag }}"
+              imagePullPolicy: {{ .Values.dataRetention.minio.image.pullPolicy }}
+              securityContext:
+                {{- toYaml .Values.langfuse.securityContext | nindent 16 }}
+              command: ["/bin/sh", "/scripts/minio-sweep.sh"]
+              env:
+                - name: RETENTION_DAYS
+                  value: {{ include "langfuse.dataRetention.days" (dict "component" .Values.dataRetention.minio.sweep "root" .) | quote }}
+                {{- include "langfuse.dataRetention.s3Env" . | nindent 16 }}
+              volumeMounts:
+                - name: scripts
+                  mountPath: /scripts
+                  readOnly: true
+              {{- with .Values.dataRetention.minio.sweep.resources }}
+              resources:
+                {{- toYaml . | nindent 16 }}
+              {{- end }}
+{{- end }}

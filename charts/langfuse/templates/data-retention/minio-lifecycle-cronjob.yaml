@@ -1,0 +1,54 @@
+{{/*
+Only rendered for S3-compatible storage (bundled MinIO or an explicit endpoint).
+For azure/gcs storage providers the mc client cannot manage lifecycle rules, so the
+job is skipped silently - configure lifecycle policies natively on those providers.
+*/}}
+{{- if and .Values.dataRetention.enabled .Values.dataRetention.minio.lifecycle.enabled (eq .Values.s3.storageProvider "s3") (or .Values.s3.deploy .Values.s3.endpoint .Values.s3.eventUpload.endpoint) }}
+apiVersion: batch/v1
+kind: CronJob
+metadata:
+  name: {{ printf "%s-data-retention-minio-lifecycle" (include "langfuse.fullname" .) | trunc 52 | trimSuffix "-" }}
+  labels:
+    {{- include "langfuse.labels" . | nindent 4 }}
+    app.kubernetes.io/component: data-retention
+    {{- with .Values.dataRetention.cronJob.labels }}
+    {{- toYaml . | nindent 4 }}
+    {{- end }}
+  {{- with .Values.dataRetention.cronJob.annotations }}
+  annotations:
+    {{- toYaml . | nindent 4 }}
+  {{- end }}
+spec:
+  schedule: {{ .Values.dataRetention.minio.lifecycle.schedule | quote }}
+  {{- include "langfuse.dataRetention.cronJobSettings" . | nindent 2 }}
+  jobTemplate:
+    spec:
+      backoffLimit: {{ .Values.dataRetention.cronJob.backoffLimit }}
+      activeDeadlineSeconds: {{ .Values.dataRetention.cronJob.activeDeadlineSeconds }}
+      template:
+        metadata:
+          labels:
+            {{- include "langfuse.selectorLabels" . | nindent 12 }}
+            app.kubernetes.io/component: data-retention
+        spec:
+          {{- include "langfuse.dataRetention.podSettings" . | nindent 10 }}
+          containers:
+            - name: minio-lifecycle
+              image: "{{ .Values.dataRetention.minio.image.repository }}:{{ .Values.dataRetention.minio.image.tag }}"
+              imagePullPolicy: {{ .Values.dataRetention.minio.image.pullPolicy }}
+              securityContext:
+                {{- toYaml .Values.langfuse.securityContext | nindent 16 }}
+              command: ["/bin/sh", "/scripts/minio-lifecycle.sh"]
+              env:
+                - name: RETENTION_DAYS
+                  value: {{ include "langfuse.dataRetention.days" (dict "component" .Values.dataRetention.minio.lifecycle "root" .) | quote }}
+                {{- include "langfuse.dataRetention.s3Env" . | nindent 16 }}
+              volumeMounts:
+                - name: scripts
+                  mountPath: /scripts
+                  readOnly: true
+              {{- with .Values.dataRetention.minio.lifecycle.resources }}
+              resources:
+                {{- toYaml . | nindent 16 }}
+              {{- end }}
+{{- end }}

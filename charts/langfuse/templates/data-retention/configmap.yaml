@@ -1,0 +1,252 @@
+{{- if .Values.dataRetention.enabled }}
+{{/*
+MEDIA SAFETY: Langfuse media files are stored as plain objects at `{projectId}/{mediaId}`
+(no type subfolder) and must NEVER expire - they are referenced by traces indefinitely.
+Both MinIO scripts below therefore only ever act on directory entries (entries with a
+trailing slash in `mc ls` output, matched via a shell case pattern) two levels deep:
+`{projectId}/{type}/` plus the literal `otel/` prefix. No rule or delete is ever applied
+to the bucket root or to bare object keys, so media files cannot match.
+
+IMAGE CONSTRAINT: the minio/mc image ships POSIX sh only (no bash, sed or awk), so the
+MinIO scripts use parameter expansion and `case` for all parsing.
+*/}}
+apiVersion: v1
+kind: ConfigMap
+metadata:
+  name: {{ include "langfuse.fullname" . }}-data-retention-scripts
+  labels:
+    {{- include "langfuse.labels" . | nindent 4 }}
+    app.kubernetes.io/component: data-retention
+data:
+  {{- if .Values.dataRetention.minio.lifecycle.enabled }}
+  minio-lifecycle.sh: |-
+    set -eu
+
+    echo "=== MinIO lifecycle setup (retention: ${RETENTION_DAYS} days, bucket: ${S3_BUCKET}) ==="
+
+    mc alias set target "${MINIO_ENDPOINT}" "${S3_ACCESS_KEY_ID}" "${S3_SECRET_ACCESS_KEY}"
+
+    echo "Rules before sync:"
+    mc ilm rule ls "target/${S3_BUCKET}" 2>/dev/null || true
+
+    # Rebuild the rule set from scratch on every run: idempotent, no duplicate
+    # accumulation, and rules for new projects/types are picked up automatically.
+    echo "Removing all existing lifecycle rules..."
+    mc ilm rule rm --all --force "target/${S3_BUCKET}" 2>/dev/null || true
+
+    echo "Adding expiration rule: otel/ -> ${RETENTION_DAYS} days"
+    mc ilm rule add --expire-days "${RETENTION_DAYS}" --prefix "otel/" "target/${S3_BUCKET}"
+
+    echo "Adding expiration rules for project event prefixes..."
+    # Top-level folders at the bucket root are Langfuse project IDs (otel/ handled above).
+    # Only {projectId}/{type}/ subfolders get rules; media objects are plain files at
+    # {projectId}/{mediaId} and are never matched (see MEDIA SAFETY note in the chart).
+    mc ls "target/${S3_BUCKET}/" | while read -r line; do
+      entry=${line##* }
+      case "${entry}" in
+        otel/) ;;
+        */)
+          project=${entry%/}
+          mc ls "target/${S3_BUCKET}/${project}/" | while read -r sub_line; do
+            sub=${sub_line##* }
+            case "${sub}" in
+              */)
+                echo "  rule: ${project}/${sub%/} -> ${RETENTION_DAYS}d"
+                mc ilm rule add --expire-days "${RETENTION_DAYS}" --prefix "${project}/${sub}" "target/${S3_BUCKET}"
+                ;;
+            esac
+          done
+          ;;
+      esac
+    done
+
+    echo ""
+    echo "=== Current lifecycle rules ==="
+    mc ilm rule ls "target/${S3_BUCKET}"
+
+    echo ""
+    echo "=== MinIO lifecycle configured successfully ==="
+  {{- end }}
+  {{- if .Values.dataRetention.minio.sweep.enabled }}
+  minio-sweep.sh: |-
+    set -eu
+
+    echo "=== MinIO sweep (deleting objects older than ${RETENTION_DAYS} days, bucket: ${S3_BUCKET}) ==="
+
+    mc alias set target "${MINIO_ENDPOINT}" "${S3_ACCESS_KEY_ID}" "${S3_SECRET_ACCESS_KEY}"
+
+    echo "Sweeping otel/ ..."
+    mc rm --recursive --force --older-than "${RETENTION_DAYS}d" "target/${S3_BUCKET}/otel/" || true
+
+    echo "Sweeping project event prefixes..."
+    # Same folder-only traversal as the lifecycle script: only {projectId}/{type}/
+    # subfolders are swept; media objects are plain files and are never touched.
+    mc ls "target/${S3_BUCKET}/" | while read -r line; do
+      entry=${line##* }
+      case "${entry}" in
+        otel/) ;;
+        */)
+          project=${entry%/}
+          mc ls "target/${S3_BUCKET}/${project}/" | while read -r sub_line; do
+            sub=${sub_line##* }
+            case "${sub}" in
+              */)
+                echo "  sweep: ${project}/${sub}"
+                mc rm --recursive --force --older-than "${RETENTION_DAYS}d" "target/${S3_BUCKET}/${project}/${sub}" || true
+                ;;
+            esac
+          done
+          ;;
+      esac
+    done
+
+    echo ""
+    echo "=== MinIO sweep complete ==="
+  {{- end }}
+  {{- if .Values.dataRetention.clickhouse.enabled }}
+  clickhouse-ttl.sh: |-
+    # POSIX sh - must run on minimal (alpine/busybox) images without bash.
+    set -eu
+
+    CH="clickhouse-client --host=${CLICKHOUSE_HOST} --port=${CLICKHOUSE_NATIVE_PORT} --user=${CLICKHOUSE_USER} --password=${CLICKHOUSE_PASSWORD} --database=${CLICKHOUSE_DB}"
+    if [ "${CLICKHOUSE_SECURE}" = "true" ]; then
+      CH="${CH} --secure"
+    fi
+
+    ON_CLUSTER=""
+    if [ -n "${CLICKHOUSE_CLUSTER_NAME}" ]; then
+      ON_CLUSTER="ON CLUSTER ${CLICKHOUSE_CLUSTER_NAME}"
+    fi
+
+    echo "=== ClickHouse TTL setup (app data: ${RETENTION_DAYS} days) ==="
+
+    FAILED=0
+    # Langfuse application tables and their event-time columns
+    for ENTRY in \
+      traces:timestamp \
+      observations:start_time \
+      scores:timestamp \
+      dataset_run_items:created_at \
+      event_log:created_at \
+      blob_storage_file_log:created_at; do
+      TABLE=${ENTRY%%:*}
+      COL=${ENTRY#*:}
+      if [ "$($CH --query="EXISTS TABLE ${TABLE}")" != "1" ]; then
+        echo "SKIP: ${TABLE} (does not exist)"
+        continue
+      fi
+      if $CH --query="ALTER TABLE ${TABLE} ${ON_CLUSTER} MODIFY TTL toDateTime(${COL}) + INTERVAL ${RETENTION_DAYS} DAY DELETE"; then
+        echo "SUCCESS: ${TABLE} (${COL})"
+      else
+        echo "FAILED: ${TABLE}"
+        FAILED=$((FAILED + 1))
+      fi
+    done
+
+    if [ "${SYSTEM_LOGS_ENABLED}" = "true" ]; then
+      echo ""
+      echo "=== System log tables: TTL ${SYSTEM_LOG_RETENTION_DAYS} days ==="
+      # ClickHouse internal logs (query_log, opentelemetry_span_log, trace_log, ...) have
+      # no TTL by default and grow unboundedly. Re-applied on every run so tables that
+      # ClickHouse recreates during upgrades get covered again automatically.
+      # System tables are per-node, so no ON CLUSTER here.
+      $CH --query="SELECT name FROM system.tables WHERE database = 'system' AND name LIKE '%_log' AND engine LIKE '%MergeTree%'" | while read -r T; do
+        # Most system logs partition on event_date; opentelemetry_span_log uses finish_date.
+        DATECOL=$($CH --query="SELECT name FROM system.columns WHERE database = 'system' AND table = '${T}' AND type = 'Date' ORDER BY name = 'event_date' DESC LIMIT 1")
+        if [ -z "${DATECOL}" ]; then
+          echo "SKIP: system.${T} (no Date column)"
+          continue
+        fi
+        if $CH --query="ALTER TABLE system.\`${T}\` MODIFY TTL ${DATECOL} + INTERVAL ${SYSTEM_LOG_RETENTION_DAYS} DAY DELETE"; then
+          echo "SUCCESS: system.${T} (${DATECOL})"
+        else
+          echo "FAILED: system.${T} (non-fatal)"
+        fi
+      done
+    fi
+
+    if [ "${DROP_ORPHANED_TABLES}" = "true" ]; then
+      echo ""
+      echo "=== Dropping orphaned system log tables (renamed _N generations after upgrades) ==="
+      $CH --query="SELECT name FROM system.tables WHERE database = 'system' AND match(name, '_log_[0-9]+$')" | while read -r T; do
+        echo "DROP system.${T}"
+        $CH --query="DROP TABLE system.\`${T}\`" || echo "FAILED to drop system.${T} (non-fatal)"
+      done
+    fi
+
+    if [ "${FAILED}" -gt 0 ]; then
+      echo ""
+      echo "ERROR: ${FAILED} application table(s) failed TTL setup"
+      exit 1
+    fi
+
+    echo ""
+    echo "=== ClickHouse TTLs configured successfully ==="
+  {{- end }}
+  {{- if .Values.dataRetention.postgres.enabled }}
+  postgres-cleanup.sh: |-
+    # POSIX sh - must run on minimal (alpine/busybox) images without bash or GNU date.
+    set -eu
+
+    PSQL="psql -tA"
+
+    echo "=== PostgreSQL cleanup (retention: ${RETENTION_DAYS} days) ==="
+    echo "Batch size: ${PG_BATCH_SIZE}, sleep between batches: ${PG_BATCH_SLEEP}s"
+
+    # ctid-based batched deletes keep lock times short on large tables.
+    # The cutoff is computed by Postgres itself (now() - interval), avoiding GNU date.
+    batch_delete() {
+      TABLE=$1
+      COLUMN=$2
+      TOTAL=0
+
+      # Skip tables that do not exist (e.g. legacy v2 tables on fresh v3 installs)
+      if [ "$($PSQL -c "SELECT to_regclass('${TABLE}') IS NULL")" = "t" ]; then
+        echo "--- SKIP ${TABLE} (does not exist) ---"
+        return 0
+      fi
+
+      echo "--- Cleaning ${TABLE} (${COLUMN} < now() - ${RETENTION_DAYS} days) ---"
+
+      while true; do
+        BATCH_COUNT=$($PSQL -c "
+          WITH deleted AS (
+            DELETE FROM ${TABLE}
+            WHERE ctid IN (
+              SELECT ctid FROM ${TABLE}
+              WHERE ${COLUMN} < now() - interval '${RETENTION_DAYS} days'
+              LIMIT ${PG_BATCH_SIZE}
+            )
+            RETURNING 1
+          )
+          SELECT COUNT(*) FROM deleted;
+        ")
+        BATCH_COUNT=$(echo "${BATCH_COUNT}" | tr -d '[:space:]')
+        if [ -z "${BATCH_COUNT}" ] || [ "${BATCH_COUNT}" = "0" ]; then
+          break
+        fi
+        TOTAL=$((TOTAL + BATCH_COUNT))
+        echo "  deleted batch: ${BATCH_COUNT} rows (total: ${TOTAL})"
+        sleep "${PG_BATCH_SLEEP}"
+      done
+
+      echo "  DONE: ${TABLE} - ${TOTAL} rows deleted"
+    }
+
+    # FK-safe order: link/junction tables before parent tables
+    batch_delete "audit_logs"        "created_at"
+    batch_delete "observation_media" "created_at"
+    batch_delete "trace_media"       "created_at"
+    batch_delete "media"             "created_at"
+    batch_delete "job_executions"    "created_at"
+    batch_delete "trace_sessions"    "created_at"
+
+    # Legacy v2 core tables (skipped automatically when absent): scores -> observations -> traces
+    batch_delete "scores"       "timestamp"
+    batch_delete "observations" "start_time"
+    batch_delete "traces"       "timestamp"
+
+    echo ""
+    echo "=== PostgreSQL cleanup complete ==="
+  {{- end }}
+{{- end }}
