@@ -773,6 +773,125 @@ s3:
     rootUserSecretKey: ""
     # -- Key where the Minio root user password is being stored inside the existing secret `s3.auth.existingSecret`
     rootPasswordSecretKey: ""
+  # -- Extra environment variables passed to the bundled MinIO subchart only (no effect on external S3). Langfuse stores raw events as highly compressible JSON, so transparent on-disk compression is enabled by default (typically 3-8x smaller). Set to `[]` to disable. NOTE: providing your own list replaces this default entirely.
+  extraEnvVars:
+    - name: MINIO_COMPRESSION_ENABLE
+      value: "on"
+    - name: MINIO_COMPRESSION_EXTENSIONS
+      value: ".json"
+    - name: MINIO_COMPRESSION_MIME_TYPES
+      value: "application/json"
+
+# Data Retention Configuration
+# Langfuse keeps raw event uploads in S3/MinIO, application rows in ClickHouse/Postgres,
+# and ClickHouse accumulates internal system logs - all without any expiry by default,
+# which makes disk usage grow unboundedly. The CronJobs configured here apply retention
+# policies to keep disk usage flat. Opt-in: nothing is rendered unless enabled.
+dataRetention:
+  # -- Master switch for all data retention CronJobs (opt-in). When false, no retention resources are rendered.
+  enabled: false
+  # -- Global retention period in days for application data (raw S3 events, ClickHouse application tables, Postgres rows). Per-component `days` settings override this value.
+  days: 30
+  # -- Suspend all retention CronJobs (sets `spec.suspend`) without deleting them.
+  suspend: false
+
+  cronJob:
+    # -- Annotations applied to all retention CronJobs
+    annotations: {}
+    # -- Additional labels applied to all retention CronJobs
+    labels: {}
+    # -- startingDeadlineSeconds for all retention CronJobs
+    startingDeadlineSeconds: 600
+    # -- How many successful Jobs to keep per CronJob
+    successfulJobsHistoryLimit: 3
+    # -- How many failed Jobs to keep per CronJob
+    failedJobsHistoryLimit: 3
+    # -- backoffLimit for retention Jobs
+    backoffLimit: 2
+    # -- activeDeadlineSeconds for retention Jobs (kills hung runs)
+    activeDeadlineSeconds: 3600
+    # -- Node selector for retention job pods. Falls back to `langfuse.nodeSelector`.
+    nodeSelector: {}
+    # -- Tolerations for retention job pods. Falls back to `langfuse.tolerations`.
+    tolerations: []
+
+  minio:
+    # -- Bucket to apply retention to. Defaults to the resolved event upload bucket (`s3.eventUpload.bucket` / `s3.bucket` / `s3.defaultBuckets`).
+    bucket: ""
+    image:
+      # -- Image for the MinIO retention jobs. NOTE: scripts are written for POSIX sh (minio/mc has no bash/sed/awk).
+      repository: minio/mc
+      # -- MinIO client image tag
+      tag: "RELEASE.2025-08-13T08-35-41Z"
+      # -- Image pull policy for the MinIO retention jobs
+      pullPolicy: IfNotPresent
+    lifecycle:
+      # -- Apply per-prefix ILM expiry rules for raw event folders (`{projectId}/{type}/`) and `otel/`. Media objects (plain files at `{projectId}/{mediaId}`) are never matched. Only rendered for the bundled MinIO or an explicit S3-compatible endpoint (`s3.storageProvider: s3`).
+      enabled: true
+      # -- Retention days for raw event objects. Falls back to `dataRetention.days`.
+      days: null
+      # -- Cron schedule. Rules are rebuilt idempotently on each run, picking up new projects and event types automatically.
+      schedule: "0 3 * * *"
+      # -- Resources for the lifecycle job container
+      resources: {}
+    sweep:
+      # -- Optional accelerator that actively deletes objects older than the retention window (`mc rm --older-than`). The MinIO ILM scanner can lag behind by a day or more; the sweep guarantees timely deletion. Heavier than ILM (lists objects), hence weekly by default.
+      enabled: false
+      # -- Retention days for the sweep. Falls back to `dataRetention.days`.
+      days: null
+      # -- Cron schedule
+      schedule: "30 3 * * 0"
+      # -- Resources for the sweep job container
+      resources: {}
+
+  clickhouse:
+    # -- Apply TTLs to the Langfuse ClickHouse tables (traces, observations, scores, dataset_run_items, event_log, blob_storage_file_log). Existing data older than the window is deleted by ClickHouse TTL merges.
+    enabled: true
+    # -- Retention days for application tables. Falls back to `dataRetention.days`.
+    days: null
+    # -- Cron schedule
+    schedule: "15 3 * * *"
+    # -- Use a secure (TLS) native connection (e.g. ClickHouse Cloud, port 9440)
+    secure: false
+    # -- Cluster name used for `ON CLUSTER` application-table ALTERs when `clickhouse.clusterEnabled` and more than one replica is deployed. Set to "" to disable ON CLUSTER.
+    clusterName: "default"
+    image:
+      # -- Image providing clickhouse-client (scripts are POSIX sh, no bash needed)
+      repository: clickhouse/clickhouse-server
+      # -- ClickHouse client image tag; keep >= the deployed server version
+      tag: "25.2-alpine"
+      # -- Image pull policy for the ClickHouse retention job
+      pullPolicy: IfNotPresent
+    # -- Resources for the ClickHouse TTL job container
+    resources: {}
+    systemLogs:
+      # -- Also apply TTLs to ClickHouse internal `system.*_log` tables (query_log, opentelemetry_span_log, trace_log, metric_log, part_log, ...). These have no TTL by default and grow unboundedly - typically far past the size of the actual Langfuse data. Safe to expire: they are diagnostics, not application data.
+      enabled: true
+      # -- Retention days for system log tables (independent of `dataRetention.days`)
+      days: 7
+      # -- Drop orphaned `system.*_log_N` table generations left behind by ClickHouse upgrades
+      dropOrphanedTables: true
+
+  postgres:
+    # -- Batched cleanup of old Postgres rows (audit_logs, media link tables, media, job_executions, trace_sessions; legacy traces/observations/scores are cleaned too when present, and skipped gracefully otherwise). Off by default - Postgres volume is low on Langfuse v3.
+    enabled: false
+    # -- Retention days for Postgres rows. Falls back to `dataRetention.days`.
+    days: null
+    # -- Cron schedule
+    schedule: "45 3 * * *"
+    image:
+      # -- Image providing psql (scripts are POSIX sh, no bash needed)
+      repository: postgres
+      # -- Postgres client image tag
+      tag: "17-alpine"
+      # -- Image pull policy for the Postgres retention job
+      pullPolicy: IfNotPresent
+    # -- Resources for the Postgres cleanup job container
+    resources: {}
+    # -- Rows deleted per batch (ctid-based batched DELETE keeps lock times short)
+    batchSize: 5000
+    # -- Sleep between batches in seconds
+    batchSleepSeconds: 2
 
 # Additional manifests
 extraManifests: []
