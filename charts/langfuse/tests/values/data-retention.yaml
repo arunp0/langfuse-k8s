@@ -1,0 +1,7 @@
+dataRetention:
+  enabled: true
+  minio:
+    sweep:
+      enabled: true
+  postgres:
+    enabled: true

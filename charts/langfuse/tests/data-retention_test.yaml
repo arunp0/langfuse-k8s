@@ -1,0 +1,263 @@
+suite: test data retention cronjobs
+templates:
+  - data-retention/configmap.yaml
+  - data-retention/minio-lifecycle-cronjob.yaml
+  - data-retention/minio-sweep-cronjob.yaml
+  - data-retention/clickhouse-ttl-cronjob.yaml
+  - data-retention/postgres-cleanup-cronjob.yaml
+tests:
+  - it: should not render any data retention resources by default
+    values:
+      - ../values.lint.yaml
+    asserts:
+      - hasDocuments:
+          count: 0
+
+  - it: should render all cronjobs and the scripts configmap when enabled
+    values:
+      - ../values.lint.yaml
+      - values/data-retention.yaml
+    asserts:
+      - hasDocuments:
+          count: 1
+      - isKind:
+          of: ConfigMap
+        template: data-retention/configmap.yaml
+      - isKind:
+          of: CronJob
+        template: data-retention/minio-lifecycle-cronjob.yaml
+      - isKind:
+          of: CronJob
+        template: data-retention/minio-sweep-cronjob.yaml
+      - isKind:
+          of: CronJob
+        template: data-retention/clickhouse-ttl-cronjob.yaml
+      - isKind:
+          of: CronJob
+        template: data-retention/postgres-cleanup-cronjob.yaml
+      - matchRegex:
+          path: data["minio-lifecycle.sh"]
+          pattern: mc ilm rule rm --all --force
+        template: data-retention/configmap.yaml
+      - matchRegex:
+          path: data["clickhouse-ttl.sh"]
+          pattern: MODIFY TTL
+        template: data-retention/configmap.yaml
+      - matchRegex:
+          path: data["postgres-cleanup.sh"]
+          pattern: to_regclass
+        template: data-retention/configmap.yaml
+
+  - it: should propagate the global retention days into job env
+    values:
+      - ../values.lint.yaml
+      - values/data-retention.yaml
+    asserts:
+      - contains:
+          path: spec.jobTemplate.spec.template.spec.containers[0].env
+          content:
+            name: RETENTION_DAYS
+            value: "30"
+        template: data-retention/minio-lifecycle-cronjob.yaml
+      - contains:
+          path: spec.jobTemplate.spec.template.spec.containers[0].env
+          content:
+            name: RETENTION_DAYS
+            value: "30"
+        template: data-retention/clickhouse-ttl-cronjob.yaml
+
+  - it: should honor per-component days override and independent system log days
+    values:
+      - ../values.lint.yaml
+      - values/data-retention.yaml
+    set:
+      dataRetention.clickhouse.days: 14
+    asserts:
+      - contains:
+          path: spec.jobTemplate.spec.template.spec.containers[0].env
+          content:
+            name: RETENTION_DAYS
+            value: "14"
+        template: data-retention/clickhouse-ttl-cronjob.yaml
+      - contains:
+          path: spec.jobTemplate.spec.template.spec.containers[0].env
+          content:
+            name: SYSTEM_LOG_RETENTION_DAYS
+            value: "7"
+        template: data-retention/clickhouse-ttl-cronjob.yaml
+      - contains:
+          path: spec.jobTemplate.spec.template.spec.containers[0].env
+          content:
+            name: RETENTION_DAYS
+            value: "30"
+        template: data-retention/minio-lifecycle-cronjob.yaml
+
+  - it: should honor schedule overrides
+    values:
+      - ../values.lint.yaml
+      - values/data-retention.yaml
+    set:
+      dataRetention.minio.lifecycle.schedule: "5 4 * * *"
+    asserts:
+      - equal:
+          path: spec.schedule
+          value: "5 4 * * *"
+        template: data-retention/minio-lifecycle-cronjob.yaml
+
+  - it: should suspend all cronjobs when dataRetention.suspend is set
+    values:
+      - ../values.lint.yaml
+      - values/data-retention.yaml
+    set:
+      dataRetention.suspend: true
+    asserts:
+      - equal:
+          path: spec.suspend
+          value: true
+        template: data-retention/minio-lifecycle-cronjob.yaml
+      - equal:
+          path: spec.suspend
+          value: true
+        template: data-retention/minio-sweep-cronjob.yaml
+      - equal:
+          path: spec.suspend
+          value: true
+        template: data-retention/clickhouse-ttl-cronjob.yaml
+      - equal:
+          path: spec.suspend
+          value: true
+        template: data-retention/postgres-cleanup-cronjob.yaml
+
+  - it: should wire the clickhouse existing secret into CLICKHOUSE_PASSWORD
+    values:
+      - ../values.lint.yaml
+      - values/data-retention.yaml
+    set:
+      clickhouse.auth.password: ""
+      clickhouse.auth.existingSecret: my-clickhouse-secret
+      clickhouse.auth.existingSecretKey: ch-password
+    asserts:
+      - contains:
+          path: spec.jobTemplate.spec.template.spec.containers[0].env
+          content:
+            name: CLICKHOUSE_PASSWORD
+            valueFrom:
+              secretKeyRef:
+                name: my-clickhouse-secret
+                key: ch-password
+        template: data-retention/clickhouse-ttl-cronjob.yaml
+
+  - it: should fall back to the bundled MinIO root credentials and service endpoint
+    values:
+      - ../values.lint.yaml
+      - values/data-retention.yaml
+    asserts:
+      - contains:
+          path: spec.jobTemplate.spec.template.spec.containers[0].env
+          content:
+            name: MINIO_ENDPOINT
+            value: "http://RELEASE-NAME-langfuse-s3:9000"
+        template: data-retention/minio-lifecycle-cronjob.yaml
+      - contains:
+          path: spec.jobTemplate.spec.template.spec.containers[0].env
+          content:
+            name: S3_ACCESS_KEY_ID
+            value: "minio"
+        template: data-retention/minio-lifecycle-cronjob.yaml
+      - contains:
+          path: spec.jobTemplate.spec.template.spec.containers[0].env
+          content:
+            name: S3_BUCKET
+            value: "langfuse"
+        template: data-retention/minio-lifecycle-cronjob.yaml
+
+  - it: should use s3 secret references for external S3
+    values:
+      - ../values.lint.yaml
+      - values/data-retention.yaml
+    set:
+      s3.deploy: false
+      s3.bucket: my-bucket
+      s3.endpoint: https://s3.example.com
+      s3.accessKeyId.secretKeyRef.name: my-s3-secret
+      s3.accessKeyId.secretKeyRef.key: access-key
+      s3.secretAccessKey.secretKeyRef.name: my-s3-secret
+      s3.secretAccessKey.secretKeyRef.key: secret-key
+    asserts:
+      - contains:
+          path: spec.jobTemplate.spec.template.spec.containers[0].env
+          content:
+            name: MINIO_ENDPOINT
+            value: "https://s3.example.com"
+        template: data-retention/minio-lifecycle-cronjob.yaml
+      - contains:
+          path: spec.jobTemplate.spec.template.spec.containers[0].env
+          content:
+            name: S3_BUCKET
+            value: "my-bucket"
+        template: data-retention/minio-lifecycle-cronjob.yaml
+      - contains:
+          path: spec.jobTemplate.spec.template.spec.containers[0].env
+          content:
+            name: S3_ACCESS_KEY_ID
+            valueFrom:
+              secretKeyRef:
+                name: my-s3-secret
+                key: access-key
+        template: data-retention/minio-lifecycle-cronjob.yaml
+
+  - it: should not render MinIO jobs without an S3 endpoint
+    values:
+      - ../values.lint.yaml
+      - values/data-retention.yaml
+    set:
+      s3.deploy: false
+      s3.bucket: my-bucket
+    asserts:
+      - hasDocuments:
+          count: 0
+        template: data-retention/minio-lifecycle-cronjob.yaml
+      - hasDocuments:
+          count: 0
+        template: data-retention/minio-sweep-cronjob.yaml
+      - hasDocuments:
+          count: 1
+        template: data-retention/clickhouse-ttl-cronjob.yaml
+
+  - it: should not render MinIO jobs for non-s3 storage providers
+    values:
+      - ../values.lint.yaml
+      - values/data-retention.yaml
+    set:
+      s3.storageProvider: azure
+    asserts:
+      - hasDocuments:
+          count: 0
+        template: data-retention/minio-lifecycle-cronjob.yaml
+      - hasDocuments:
+          count: 0
+        template: data-retention/minio-sweep-cronjob.yaml
+
+  - it: should set postgres batch knobs
+    values:
+      - ../values.lint.yaml
+      - values/data-retention.yaml
+    asserts:
+      - contains:
+          path: spec.jobTemplate.spec.template.spec.containers[0].env
+          content:
+            name: PG_BATCH_SIZE
+            value: "5000"
+        template: data-retention/postgres-cleanup-cronjob.yaml
+      - contains:
+          path: spec.jobTemplate.spec.template.spec.containers[0].env
+          content:
+            name: PG_BATCH_SLEEP
+            value: "2"
+        template: data-retention/postgres-cleanup-cronjob.yaml
+      - contains:
+          path: spec.jobTemplate.spec.template.spec.containers[0].env
+          content:
+            name: PGPASSWORD
+            value: "secretPassword"
+        template: data-retention/postgres-cleanup-cronjob.yaml
