@@ -76,6 +76,7 @@ spec:
             {{- include "langfuse.commonEnv" . | nindent 12 }}
             - name: PORT
               value: {{ .Values.langfuse.web.service.port | quote }}
+            {{- include "langfuse.aiFeaturesMcpWebEnv" . | nindent 12 }}
             {{- $additionalEnv := concat (.Values.langfuse.additionalEnv | default list ) (.Values.langfuse.web.pod.additionalEnv | default list )}}
             {{- if not (include "langfuse.getEnvVar" (dict "env" $additionalEnv "name" "HOSTNAME")) }}
             - name: HOSTNAME
@@ -138,6 +139,9 @@ spec:
       {{- with (coalesce .Values.langfuse.web.pod.topologySpreadConstraints .Values.langfuse.pod.topologySpreadConstraints) }}
       topologySpreadConstraints:
         {{- toYaml . | nindent 8 }}
+      {{- end }}
+      {{- with (coalesce .Values.langfuse.web.pod.priorityClassName .Values.langfuse.priorityClassName) }}
+      priorityClassName: {{ . | quote }}
       {{- end }}
       {{- with .Values.langfuse.dnsConfig }}
       dnsConfig:

@@ -147,7 +147,7 @@ tests:
                 key: ch-password
         template: data-retention/clickhouse-ttl-cronjob.yaml
 
-  - it: should fall back to the bundled MinIO root credentials and service endpoint
+  - it: should fall back to the bundled SeaweedFS credentials and service endpoint
     values:
       - ../values.lint.yaml
       - values/data-retention.yaml
@@ -156,13 +156,25 @@ tests:
           path: spec.jobTemplate.spec.template.spec.containers[0].env
           content:
             name: MINIO_ENDPOINT
-            value: "http://RELEASE-NAME-langfuse-s3:9000"
+            value: "http://RELEASE-NAME-s3-all-in-one:8333"
         template: data-retention/minio-lifecycle-cronjob.yaml
       - contains:
           path: spec.jobTemplate.spec.template.spec.containers[0].env
           content:
             name: S3_ACCESS_KEY_ID
-            value: "minio"
+            valueFrom:
+              secretKeyRef:
+                name: "langfuse-s3-auth"
+                key: accessKey
+        template: data-retention/minio-lifecycle-cronjob.yaml
+      - contains:
+          path: spec.jobTemplate.spec.template.spec.containers[0].env
+          content:
+            name: S3_SECRET_ACCESS_KEY
+            valueFrom:
+              secretKeyRef:
+                name: "langfuse-s3-auth"
+                key: secretKey
         template: data-retention/minio-lifecycle-cronjob.yaml
       - contains:
           path: spec.jobTemplate.spec.template.spec.containers[0].env
@@ -259,5 +271,46 @@ tests:
           path: spec.jobTemplate.spec.template.spec.containers[0].env
           content:
             name: PGPASSWORD
-            value: "secretPassword"
+            valueFrom:
+              secretKeyRef:
+                name: "langfuse-postgresql-auth"
+                key: USERDB_PASSWORD
         template: data-retention/postgres-cleanup-cronjob.yaml
+
+  - it: should pull the mc client from a registry that is publicly available
+    # Docker Hub's minio/mc is no longer publicly pullable; a wrong default here only
+    # surfaces at runtime as ImagePullBackOff, so pin the registry in a test.
+    values:
+      - ../values.lint.yaml
+      - values/data-retention.yaml
+    set:
+      dataRetention.minio.sweep.enabled: true
+    asserts:
+      - equal:
+          path: spec.jobTemplate.spec.template.spec.containers[0].image
+          value: "quay.io/minio/mc:RELEASE.2025-08-13T08-35-41Z"
+        template: data-retention/minio-lifecycle-cronjob.yaml
+      - equal:
+          path: spec.jobTemplate.spec.template.spec.containers[0].image
+          value: "quay.io/minio/mc:RELEASE.2025-08-13T08-35-41Z"
+        template: data-retention/minio-sweep-cronjob.yaml
+
+  - it: should apply TTLs to the Langfuse v4 clickhouse tables
+    # v4 renamed dataset_run_items -> dataset_run_items_rmt, dropped event_log and added
+    # events_core/events_full. Verified against a live v4 cluster; guard it here.
+    values:
+      - ../values.lint.yaml
+      - values/data-retention.yaml
+    asserts:
+      - matchRegex:
+          path: data["clickhouse-ttl.sh"]
+          pattern: "events_core:start_time"
+        template: data-retention/configmap.yaml
+      - matchRegex:
+          path: data["clickhouse-ttl.sh"]
+          pattern: "events_full:start_time"
+        template: data-retention/configmap.yaml
+      - matchRegex:
+          path: data["clickhouse-ttl.sh"]
+          pattern: "dataset_run_items_rmt:created_at"
+        template: data-retention/configmap.yaml

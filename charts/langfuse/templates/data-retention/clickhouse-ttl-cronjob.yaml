@@ -1,14 +1,13 @@
 {{- if and .Values.dataRetention.enabled .Values.dataRetention.clickhouse.enabled (or .Values.clickhouse.deploy .Values.clickhouse.host) }}
 {{/*
-ON CLUSTER is only used for application tables and mirrors the chart's cluster detection:
-cluster mode is off when clusterEnabled is false, or when the bundled ClickHouse runs a
-single replica. system.* tables are always per-node and never use ON CLUSTER.
+ON CLUSTER is only used for application tables and mirrors the chart's cluster detection
+(clickhouse.cluster.enabled, as passed to CLICKHOUSE_CLUSTER_ENABLED). Under the ClickHouse
+operator a single replica is still a real cluster, so there is no replica-count carve-out.
+system.* tables are always per-node and never use ON CLUSTER.
 */}}
 {{- $clusterName := "" }}
-{{- if .Values.clickhouse.clusterEnabled }}
-{{- if not (and .Values.clickhouse.deploy (eq (int .Values.clickhouse.replicaCount) 1)) }}
+{{- if .Values.clickhouse.cluster.enabled }}
 {{- $clusterName = .Values.dataRetention.clickhouse.clusterName }}
-{{- end }}
 {{- end }}
 apiVersion: batch/v1
 kind: CronJob

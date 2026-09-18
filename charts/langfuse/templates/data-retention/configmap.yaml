@@ -122,11 +122,17 @@ data:
 
     FAILED=0
     # Langfuse application tables and their event-time columns
+    # Names differ across Langfuse majors (v4 renamed dataset_run_items -> *_rmt, dropped
+    # event_log and added events_core/events_full). Every entry is guarded by EXISTS below,
+    # so listing both generations keeps one script correct for v3 and v4.
     for ENTRY in \
       traces:timestamp \
       observations:start_time \
       scores:timestamp \
+      events_core:start_time \
+      events_full:start_time \
       dataset_run_items:created_at \
+      dataset_run_items_rmt:created_at \
       event_log:created_at \
       blob_storage_file_log:created_at; do
       TABLE=${ENTRY%%:*}

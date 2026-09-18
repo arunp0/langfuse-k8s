@@ -35,6 +35,3 @@ dataRetention:
 
   postgres:
     enabled: true
-
-# MinIO on-disk compression for JSON payloads is already enabled by default via
-# s3.extraEnvVars (typically 3-8x smaller). Nothing to configure here.
